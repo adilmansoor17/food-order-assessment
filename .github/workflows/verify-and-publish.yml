@@ -1,0 +1,148 @@
+name: Verify and publish
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Scan Git history for committed secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "false"
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: food_ordering
+          POSTGRES_PASSWORD: food_ordering_dev
+          POSTGRES_DB: food_ordering_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U food_ordering -d food_ordering_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      rabbitmq:
+        image: rabbitmq:4-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: food_ordering
+          RABBITMQ_DEFAULT_PASS: food_ordering_dev
+          RABBITMQ_DEFAULT_VHOST: food_ordering_test
+        ports: ["5672:5672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s --health-timeout 5s --health-retries 12
+    env:
+      CI: "true"
+      NODE_ENV: test
+      API_PORT: "3001"
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_USER: food_ordering
+      DB_PASSWORD: food_ordering_dev
+      DB_NAME: food_ordering_test
+      TEST_DATABASE_URL: postgresql://food_ordering:food_ordering_dev@127.0.0.1:5432/food_ordering_test
+      TEST_RABBITMQ_URL: amqp://food_ordering:food_ordering_dev@127.0.0.1:5672/food_ordering_test
+      BROWSER_TEST_DATABASE_URL: postgresql://food_ordering:food_ordering_dev@127.0.0.1:5432/food_ordering_test
+      REDIS_URL: redis://127.0.0.1:6379
+      RABBITMQ_URL: amqp://food_ordering:food_ordering_dev@127.0.0.1:5672/food_ordering_test
+      WEB_ORIGIN: http://localhost:3000
+      NEXT_PUBLIC_API_BASE_URL: /v1
+      JWT_ACCESS_SECRET: ci_access_secret_012345678901234567890123456789
+      JWT_REFRESH_SECRET: ci_refresh_secret_012345678901234567890123456789
+      OTP_PEPPER: ci_otp_pepper_0123456789012345678901234567890
+      AUTH_TOKEN_HASH_SECRET: ci_token_hash_secret_01234567890123456789012345
+      OTP_DELIVERY_MODE: test
+      BANK_NAME: Test Bank
+      BANK_ACCOUNT_NAME: Food Ordering Test
+      BANK_IBAN: PK00TEST0000000000000000
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.22.3
+          cache: npm
+      - name: Generate disposable CI encryption key
+        run: echo "OTP_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - run: npm ci
+      - name: Validate both Compose recipes
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose --env-file .env -f compose.prod.yaml config --quiet
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run db:migrate
+      - run: npm run test:e2e
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - name: Save browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: browser-evidence
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  images:
+    needs: [verify, secrets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Log in to GHCR for version tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build or publish API image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ghcr.io/${{ github.repository }}-api:${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.sha }}
+      - name: Build or publish web image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          build-args: NEXT_PUBLIC_API_BASE_URL=/v1
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ghcr.io/${{ github.repository }}-web:${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.sha }}

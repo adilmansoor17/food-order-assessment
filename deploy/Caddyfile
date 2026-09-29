@@ -1,0 +1,7 @@
+{$APP_DOMAIN} {
+  encode zstd gzip
+
+  @api path /v1/* /docs /docs/* /docs-json
+  reverse_proxy @api api:3001
+  reverse_proxy web:3000
+}

@@ -1,0 +1,26 @@
+{
+  "name": "food-order-assessment",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "engines": {
+    "node": ">=22.22.3"
+  },
+  "scripts": {
+    "dev:api": "npm run start:dev --workspace=api",
+    "dev:web": "npm run dev --workspace=web",
+    "db:migrate": "npm run migrate --workspace=api",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspace=api",
+    "test:e2e": "npm run test:e2e --workspace=api",
+    "load:orders": "npm run load:orders --workspace=api",
+    "test:browser": "playwright test --config=tests/browser/playwright.config.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}
